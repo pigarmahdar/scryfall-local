@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""
+scryfall — Local MTG card search from your Oracle cache.
+Usage:
+  scryfall <command> <query> [options]
+
+Commands:
+  name <query>        Search by card name (partial match)
+  text <query>        Search by oracle text (what the card does)
+  type <query>        Search by type line (creature, enchantment, etc.)
+  color <W|U|B|R|G>  Search by colour identity (combine letters, e.g. WG)
+  cmc <number>        Search by mana value (exact or <=  / >=)
+  keyword <query>     Search by keyword (Flying, Trample, etc.)
+  random              Get a random card
+  search <query>      General search across name + text + type
+
+Options:
+  --limit N           Max results (default: 10)
+  --commander <WUBRG> Filter to cards legal in those colours
+  --legal <format>    Only cards legal in a format (commander, modern, etc.)
+  --exact             Exact name match only (for 'name' command)
+
+Examples:
+  scryfall name "Gilded Drake"
+  scryfall text "create a treasure token"
+  scryfall type "enchantment"
+  scryfall color WG
+  scryfall cmc <=3
+  scryfall keyword flying
+  scryfall random
+  scryfall search "2 mana green creature"
+  scryfall name "Sol Ring" --legal commander --limit 5
+"""
+
+import json
+import os
+import re
+import sys
+import random as rng
+
+# ── Path to the Oracle cards cache ──────────────────────────────────────
+ORACLE_PATH = os.path.expanduser("~/.hermes/scryfall/oracle-cards.jsonl")
+
+# ── Colour symbols for display ──────────────────────────────────────────
+COLOUR_SYMBOLS = {
+    "W": "⚪", "U": "🔵", "B": "⚫", "R": "🔴", "G": "🟢"
+}
+COLOUR_NAMES = {
+    "W": "White", "U": "Blue", "B": "Black", "R": "Red", "G": "Green"
+}
+
+# ── Load all cards into memory ──────────────────────────────────────────
+CARDS = []
+
+def load_cards():
+    global CARDS
+    if CARDS:
+        return
+    if not os.path.exists(ORACLE_PATH):
+        print(f"Error: Oracle cards file not found at {ORACLE_PATH}")
+        print("Run the Scryfall cache update first.")
+        sys.exit(1)
+    with open(ORACLE_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    CARDS.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+# ── Display a single card ───────────────────────────────────────────────
+def display_card(card, index=None):
+    name = card.get("name", "Unknown")
+    mana = card.get("mana_cost", "—")
+    cmc = card.get("cmc", "?")
+    type_line = card.get("type_line", "—")
+    oracle = card.get("oracle_text", "—")
+    power = card.get("power")
+    toughness = card.get("toughness")
+    colors = card.get("color_identity", [])
+    keywords = card.get("keywords", [])
+    legalities = card.get("legalities", {})
+
+    # Colour display
+    colour_str = " ".join(COLOUR_SYMBOLS.get(c, c) for c in colors) if colors else "—"
+
+    # P/T display
+    pt = f" ({power}/{toughness})" if power and toughness else ""
+
+    # Format legality badges
+    legal_formats = [f for f, v in legalities.items() if v == "legal" and f in ("commander", "modern", "legacy", "pauper", "vintage")]
+    legal_str = ", ".join(legal_formats) if legal_formats else "none"
+
+    # Build output
+    prefix = f"  [{index}] " if index is not None else "  "
+    print(f"\n{prefix}\033[1;33m{name}\033[0m  {mana}  (CMC {cmc})")
+    print(f"       {type_line}{pt}")
+    print(f"       {colour_str}")
+    if keywords:
+        print(f"       Keywords: {', '.join(keywords)}")
+    print(f"       {oracle}")
+    print(f"       Legal: {legal_str}")
+    print(f"       {card.get('scryfall_uri', '')}")
+
+# ── Search functions ────────────────────────────────────────────────────
+def search_name(query, exact=False):
+    query_lower = query.lower().strip('"')
+    results = []
+    for card in CARDS:
+        name = card.get("name", "").lower()
+        if exact:
+            if name == query_lower:
+                results.append(card)
+        else:
+            if query_lower in name:
+                results.append(card)
+    return results
+
+def search_text(query):
+    query_lower = query.lower()
+    results = []
+    for card in CARDS:
+        oracle = card.get("oracle_text", "").lower()
+        if query_lower in oracle:
+            results.append(card)
+    return results
+
+def search_type(query):
+    query_lower = query.lower()
+    results = []
+    for card in CARDS:
+        type_line = card.get("type_line", "").lower()
+        if query_lower in type_line:
+            results.append(card)
+    return results
+
+def search_color(colors):
+    colors = set(colors.upper())
+    results = []
+    for card in CARDS:
+        card_colors = set(card.get("color_identity", []))
+        if colors.issubset(card_colors):
+            results.append(card)
+    return results
+
+def search_cmc(expr):
+    """Search by CMC. Supports: =3, <=3, >=3, or just a number."""
+    expr = expr.strip()
+    results = []
+
+    if expr.startswith("<="):
+        try:
+            val = float(expr[2:])
+            results = [c for c in CARDS if c.get("cmc", 99) <= val]
+        except ValueError:
+            pass
+    elif expr.startswith(">="):
+        try:
+            val = float(expr[2:])
+            results = [c for c in CARDS if c.get("cmc", 0) >= val]
+        except ValueError:
+            pass
+    elif expr.startswith("="):
+        try:
+            val = float(expr[1:])
+            results = [c for c in CARDS if c.get("cmc", -1) == val]
+        except ValueError:
+            pass
+    else:
+        try:
+            val = float(expr)
+            results = [c for c in CARDS if c.get("cmc", -1) == val]
+        except ValueError:
+            pass
+    return results
+
+def search_keyword(query):
+    query_lower = query.lower()
+    results = []
+    for card in CARDS:
+        keywords = [k.lower() for k in card.get("keywords", [])]
+        if any(query_lower in k for k in keywords):
+            results.append(card)
+    return results
+
+def search_general(query):
+    """Search across name, oracle text, and type line."""
+    query_lower = query.lower()
+    results = []
+    seen = set()
+    for card in CARDS:
+        card_id = card.get("id", "")
+        if card_id in seen:
+            continue
+        name = card.get("name", "").lower()
+        oracle = card.get("oracle_text", "").lower()
+        type_line = card.get("type_line", "").lower()
+        if query_lower in name or query_lower in oracle or query_lower in type_line:
+            results.append(card)
+            seen.add(card_id)
+    return results
+
+def search_random():
+    return [rng.choice(CARDS)]
+
+# ── Apply filters ───────────────────────────────────────────────────────
+def apply_filters(results, commander=None, legal=None):
+    if commander:
+        commander = set(commander.upper())
+        results = [c for c in results if commander.issubset(set(c.get("color_identity", [])))]
+    if legal:
+        legal = legal.lower()
+        results = [c for c in results if c.get("legalities", {}).get(legal) == "legal"]
+    return results
+
+# ── Parse arguments ─────────────────────────────────────────────────────
+def parse_args(args):
+    """Parse command line arguments into (command, query, options)."""
+    command = None
+    query_parts = []
+    options = {"limit": 10, "commander": None, "legal": None, "exact": False}
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--limit" and i + 1 < len(args):
+            try:
+                options["limit"] = int(args[i + 1])
+            except ValueError:
+                pass
+            i += 2
+        elif arg == "--commander" and i + 1 < len(args):
+            options["commander"] = args[i + 1]
+            i += 2
+        elif arg == "--legal" and i + 1 < len(args):
+            options["legal"] = args[i + 1]
+            i += 2
+        elif arg == "--exact":
+            options["exact"] = True
+            i += 1
+        elif command is None:
+            command = arg.lower()
+            i += 1
+        else:
+            query_parts.append(arg)
+            i += 1
+
+    query = " ".join(query_parts) if query_parts else ""
+    return command, query, options
+
+# ── Main ────────────────────────────────────────────────────────────────
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        return
+
+    command, query, options = parse_args(sys.argv[1:])
+
+    # Load cards
+    load_cards()
+
+    # Run search
+    results = []
+    if command == "name":
+        results = search_name(query, exact=options["exact"])
+    elif command == "text":
+        results = search_text(query)
+    elif command == "type":
+        results = search_type(query)
+    elif command == "color":
+        results = search_color(query)
+    elif command == "cmc":
+        results = search_cmc(query)
+    elif command == "keyword":
+        results = search_keyword(query)
+    elif command == "random":
+        results = search_random()
+    elif command == "search":
+        results = search_general(query)
+    else:
+        # If no valid command, treat the whole thing as a general search
+        results = search_general(f"{command} {' '.join(sys.argv[2:])}".strip())
+
+    # Apply filters
+    results = apply_filters(results, commander=options["commander"], legal=options["legal"])
+
+    # Display
+    if not results:
+        print(f"\n  No cards found matching your search.")
+        return
+
+    limit = options["limit"]
+    total = len(results)
+    shown = min(limit, total)
+
+    if total > shown:
+        print(f"\n  Showing {shown} of {total} results (use --limit {total} to see all):")
+    else:
+        print(f"\n  Found {total} result{'s' if total != 1 else ''}:")
+
+    for i, card in enumerate(results[:shown], 1):
+        display_card(card, index=i)
+
+    print()  # trailing newline
+
+if __name__ == "__main__":
+    main()

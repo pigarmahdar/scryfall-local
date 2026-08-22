@@ -11,6 +11,7 @@ Commands:
   color <W|U|B|R|G>  Search by colour identity (combine letters, e.g. WG)
   cmc <number>        Search by mana value (exact or <=  / >=)
   keyword <query>     Search by keyword (Flying, Trample, etc.)
+  fuzzy <query>        Fuzzy name search (handles typos, partial names)
   random              Get a random card
   search <query>      General search across name + text + type
 
@@ -30,6 +31,8 @@ Examples:
   scryfall random
   scryfall search "2 mana green creature"
   scryfall name "Sol Ring" --legal commander --limit 5
+  scryfall fuzzy "sol rng"
+  scryfall fuzzy "jac bele"
 """
 
 import json
@@ -37,6 +40,10 @@ import os
 import re
 import sys
 import random as rng
+import urllib.request
+import urllib.parse
+import urllib.error
+import difflib
 
 # ── Path to the Oracle cards cache ──────────────────────────────────────
 ORACLE_PATH = os.path.expanduser("~/.hermes/scryfall/oracle-cards.jsonl")
@@ -204,6 +211,151 @@ def search_general(query):
 def search_random():
     return [rng.choice(CARDS)]
 
+# ── Scryfall API calls for fuzzy matching ─────────────────────────────
+SCRYFALL_API = "https://api.scryfall.com"
+USER_AGENT = "scryfall-cli/1.0"
+
+def _api_get(endpoint, params=None):
+    """Make a GET request to the Scryfall API. Returns parsed JSON or None."""
+    url = f"{SCRYFALL_API}{endpoint}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Return the error body so callers can inspect it
+        body = None
+        try:
+            body = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            pass
+        return {"error": True, "status": e.code, "body": body}
+    except Exception as e:
+        return {"error": True, "status": 0, "body": {"details": str(e)}}
+
+def scryfall_fuzzy(name):
+    """Fuzzy card lookup via /cards/named?fuzzy=. Returns card dict or error dict."""
+    return _api_get("/cards/named", {"fuzzy": name})
+
+def scryfall_autocomplete(query):
+    """Autocomplete card names via /cards/autocomplete. Returns list of names or empty list."""
+    result = _api_get("/cards/autocomplete", {"q": query})
+    if result and not result.get("error") and "data" in result:
+        return result["data"]
+    return []
+
+def handle_fuzzy(query):
+    """Interactive fuzzy search: try fuzzy → if ambiguous/no match, autocomplete → pick → lookup."""
+    if not query:
+        print("\n  Usage: scryfall fuzzy <card name>")
+        return
+
+    # Step 1: Try Scryfall fuzzy match
+    print(f"\n  \033[1mSearching for:\033[0m \"{query}\"")
+    result = scryfall_fuzzy(query)
+
+    if result and not result.get("error"):
+        # Sanity check: is the returned name actually similar to the query?
+        name = result.get("name", "Unknown")
+        # Use difflib to compare — handles typos, extra letters, etc.
+        ratio = difflib.SequenceMatcher(None, query.lower(), name.lower()).ratio()
+        # Also check word-level overlap as a secondary signal
+        query_words = set(w.lower() for w in query.split() if len(w) >= 3)
+        name_lower = name.lower()
+        has_word_overlap = any(w in name_lower or name_lower.startswith(w[:4]) for w in query_words)
+
+        if ratio >= 0.55 or has_word_overlap:
+            print(f"  \033[1;32m✓ Found:\033[0m {name}\n")
+            # Try to display from local cache for full data, fall back to API data
+            local = search_name(name, exact=True)
+            if local:
+                display_card(local[0])
+            else:
+                display_api_card(result)
+            return
+        else:
+            # Fuzzy returned something unrelated — treat as no match
+            print(f"  \033[1;33m~ Scryfall suggested \"{name}\" but it doesn't match your query.\033[0m\n")
+
+    # Step 2: Fuzzy failed — try autocomplete for suggestions
+    error_body = (result or {}).get("body", {}) or {}
+    details = error_body.get("details", "")
+    print(f"  \033[1;31m✗ No exact fuzzy match.\033[0m {details}\n")
+
+    suggestions = scryfall_autocomplete(query)
+    if not suggestions:
+        # Try autocomplete on individual words (pick the most "name-like" one)
+        words = [w for w in query.split() if len(w) >= 3]
+        for word in words:
+            suggestions = scryfall_autocomplete(word)
+            if suggestions:
+                break
+
+    if not suggestions:
+        print("  No close matches found. Try a different spelling or use 'scryfall name' for partial search.")
+        return
+
+    # Step 3: Show suggestions and let user pick
+    print("  \033[1;36mDid you mean…\033[0m")
+    for i, name in enumerate(suggestions, 1):
+        print(f"    [{i}] {name}")
+    print(f"    [0] Cancel\n")
+
+    try:
+        choice = input("  Pick a number: ").strip()
+        choice = int(choice)
+    except (ValueError, EOFError):
+        print("  Cancelled.")
+        return
+
+    if choice < 1 or choice > len(suggestions):
+        print("  Cancelled.")
+        return
+
+    picked = suggestions[choice - 1]
+    print(f"\n  \033[1;32m→ Looking up:\033[0m {picked}\n")
+
+    # Step 4: Lookup the picked card from local cache (exact)
+    local = search_name(picked, exact=True)
+    if local:
+        display_card(local[0])
+    else:
+        # Fall back to API
+        api_card = scryfall_fuzzy(picked)
+        if api_card and not api_card.get("error"):
+            display_api_card(api_card)
+        else:
+            print(f"  Could not find \"{picked}\" in cache or on Scryfall.")
+
+def display_api_card(card):
+    """Display a card from API JSON (same format as Oracle cache but may have extra fields)."""
+    name = card.get("name", "Unknown")
+    mana = card.get("mana_cost", "—")
+    cmc = card.get("cmc", "?")
+    type_line = card.get("type_line", "—")
+    oracle = card.get("oracle_text", "—")
+    power = card.get("power")
+    toughness = card.get("toughness")
+    colors = card.get("color_identity", [])
+    keywords = card.get("keywords", [])
+    legalities = card.get("legalities", {})
+
+    colour_str = " ".join(COLOUR_SYMBOLS.get(c, c) for c in colors) if colors else "—"
+    pt = f" ({power}/{toughness})" if power and toughness else ""
+    legal_formats = [f for f, v in legalities.items() if v == "legal" and f in ("commander", "modern", "legacy", "pauper", "vintage")]
+    legal_str = ", ".join(legal_formats) if legal_formats else "none"
+
+    print(f"\n  \033[1;33m{name}\033[0m  {mana}  (CMC {cmc})")
+    print(f"       {type_line}{pt}")
+    print(f"       {colour_str}")
+    if keywords:
+        print(f"       Keywords: {', '.join(keywords)}")
+    print(f"       {oracle}")
+    print(f"       Legal: {legal_str}")
+    print(f"       {card.get('scryfall_uri', '')}")
+
 # ── Apply filters ───────────────────────────────────────────────────────
 def apply_filters(results, commander=None, legal=None):
     if commander:
@@ -264,6 +416,9 @@ def main():
     results = []
     if command == "name":
         results = search_name(query, exact=options["exact"])
+    elif command == "fuzzy":
+        handle_fuzzy(query)
+        return
     elif command == "text":
         results = search_text(query)
     elif command == "type":

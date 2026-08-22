@@ -7,6 +7,7 @@ Built for Magic: The Gathering players who want fast card lookups during deckbui
 ## Features
 
 - 🔍 **Search by name, text, type, colour, mana cost, or keyword**
+- 🔮 **Fuzzy name search** — handles typos, misspellings, and partial names
 - 🎲 **Random card** generation
 - ⚡ **Instant** — loads 38,000+ cards in under a second
 - 🔒 **Offline** — works without internet once the cache is downloaded
@@ -64,6 +65,7 @@ scryfall <command> <query> [options]
 | `color` | Search by colour identity | `scryfall color UG` |
 | `cmc` | Search by mana value | `scryfall cmc <=3` |
 | `keyword` | Search by keyword ability | `scryfall keyword flash` |
+| `fuzzy` | Fuzzy name search (handles typos, partial names) | `scryfall fuzzy "sol rng"` |
 | `random` | Get a random card | `scryfall random` |
 | `search` | General search (name + text + type) | `scryfall search "2 mana counter"` |
 
@@ -106,6 +108,11 @@ scryfall text "counter target spell" --cmc <=2
 # Random card for EDH night
 scryfall random
 
+# Fuzzy search — handles typos and partial names
+scryfall fuzzy "sol rng"           # → autocomplete: Sol Ring is #2
+scryfall fuzzy "thragtuskk"        # → direct match: Thragtusk
+scryfall fuzzy "jac bele"          # → autocomplete: Jace Beleren etc.
+
 # All flash creatures in blue
 scryfall keyword flash --commander U
 ```
@@ -118,6 +125,25 @@ scryfall keyword flash --commander U
 # Look up cards, then paste the results into your LM session
 scryfall text "whenever a creature enters" --legal commander --limit 5
 ```
+
+## Fuzzy Search
+
+The `fuzzy` command uses Scryfall's API to handle typos, misspellings, and partial card names. It works in two stages:
+
+1. **Direct fuzzy match** — Scryfall tries to find a single unambiguous match for your query. Minor typos like extra/missing letters work great (`thragtuskk` → Thragtusk).
+
+2. **Autocomplete fallback** — If no direct match is found, it calls Scryfall's autocomplete endpoint to suggest close matches. You pick a number and it looks up the full card.
+
+A sanity check prevents Scryfall's occasional wild guesses (e.g. "sol rng" → Oathsworn Giant) from being accepted silently — if the suggested card doesn't resemble your input, it falls through to autocomplete.
+
+```bash
+scryfall fuzzy "thragtusk"     # Direct match
+scryfall fuzzy "thragtuskk"    # Typo → still finds Thragtusk
+scryfall fuzzy "sol rng"       # Autocomplete → pick Sol Ring
+scryfall fuzzy "swords to plowshare"  # Missing letter → Swords to Plowshares
+```
+
+**Note:** The `fuzzy` command requires an internet connection (it calls the Scryfall API). All other commands work fully offline.
 
 ## Data Source
 

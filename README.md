@@ -14,21 +14,22 @@ Built for Magic: The Gathering players who want fast card lookups during deckbui
 - 🎨 **Colour-coded output** with emoji symbols (⚪🔵⚫🔴🟢)
 - 🏛️ **Format filtering** — Commander, Modern, Legacy, Pauper, Vintage
 - 🧩 **Commander colour identity** filtering
+- 🔄 **Built-in cache updater** — `scryfall update` fetches the latest data from Scryfall
 
 ## Quick Start
 
 ### 1. Download the Scryfall Oracle cache
 
-```bash
+```shell
 curl -o ~/.hermes/scryfall/oracle-cards.jsonl \
   "https://data.scryfall.io/oracle-cards/oracle-cards.jsonl"
 ```
 
-Or use the [Scryfall bulk data API](https://scryfall.com/docs/api/bulk-data) to get the latest download URL.
+Or use the built-in updater after installation (see [Updating the cache](#updating-the-cache)).
 
 ### 2. Install the script
 
-```bash
+```shell
 # Clone this repo
 git clone https://github.com/pigarmahdar/scryfall-local.git
 cd scryfall-local
@@ -42,57 +43,40 @@ cp scryfall /usr/local/bin/scryfall
 
 ### 3. Search!
 
-```bash
+```shell
 scryfall name "Sol Ring"
 scryfall text "create a treasure token"
 scryfall color WG --legal commander
 scryfall random
 ```
 
-## Usage
-
-```
-scryfall <command> <query> [options]
-```
-
-### Commands
+## Commands
 
 | Command | Description | Example |
 |---------|-------------|---------|
 | `name` | Search by card name (partial match) | `scryfall name "Gilded Drake"` |
 | `text` | Search by oracle text | `scryfall text "destroy all creatures"` |
 | `type` | Search by type line | `scryfall type "enchantment"` |
-| `color` | Search by colour identity | `scryfall color UG` |
-| `cmc` | Search by mana value | `scryfall cmc <=3` |
+| `color` | Search by colour identity (WUBRG letters) | `scryfall color WG` |
+| `cmc` | Search by mana value (`=`, `<=`, `>=`) | `scryfall cmc <=3` |
 | `keyword` | Search by keyword ability | `scryfall keyword flash` |
 | `fuzzy` | Fuzzy name search (handles typos, partial names) | `scryfall fuzzy "sol rng"` |
 | `random` | Get a random card | `scryfall random` |
-| `search` | General search (name + text + type) | `scryfall search "2 mana counter"` |
+| `search` | General search across name + text + type | `scryfall search "2 mana green creature"` |
+| `update` | Update the Oracle cache from Scryfall | `scryfall update` |
 
-### Options
+## Options
 
 | Flag | Description | Example |
 |------|-------------|---------|
 | `--limit N` | Max results (default: 10) | `--limit 20` |
 | `--commander WUBRG` | Filter by commander colour identity | `--commander WU` |
 | `--legal <format>` | Only cards legal in a format | `--legal commander` |
-| `--exact` | Exact name match only | `--exact` |
-
-### Colour Codes
-
-| Code | Colour |
-|------|--------|
-| W | White ⚪ |
-| U | Blue 🔵 |
-| B | Black ⚫ |
-| R | Red 🔴 |
-| G | Green 🟢 |
-
-Combine letters for multicolour: `WG` (Selesnya), `UB` (Dimir), `RUG` (Temur), `WUBRG` (5-colour)
+| `--exact` | Exact name match only (for `name` command) | `--exact` |
 
 ## Examples
 
-```bash
+```shell
 # Find Lightning Greaves
 scryfall name "Lightning Greaves"
 
@@ -103,67 +87,83 @@ scryfall type "creature" --commander WG --legal commander
 scryfall text "create a treasure token"
 
 # Cheap counterspells (CMC 2 or less)
-scryfall text "counter target spell" --cmc <=2
+scryfall text "counter target spell" --legal commander --limit 5
 
 # Random card for EDH night
 scryfall random
 
 # Fuzzy search — handles typos and partial names
-scryfall fuzzy "sol rng"           # → autocomplete: Sol Ring is #2
-scryfall fuzzy "thragtuskk"        # → direct match: Thragtusk
-scryfall fuzzy "jac bele"          # → autocomplete: Jace Beleren etc.
+scryfall fuzzy "sol rng"           # → Sol Ring
+scryfall fuzzy "thragtuskk"        # → Thragtusk
+scryfall fuzzy "jac bele"          # → Jace Beleren etc.
 
 # All flash creatures in blue
 scryfall keyword flash --commander U
 ```
 
+## Updating the Cache
+
+Card data from Scryfall is updated regularly (new sets, legality changes, Oracle text corrections). The tool includes a built-in updater:
+
+```shell
+scryfall update
+```
+
+This downloads the latest Oracle Cards bulk data (~200 MB) from Scryfall, backs up your existing cache, and replaces it. If anything fails, the backup is restored automatically.
+
+You can also update manually:
+
+```shell
+curl -o ~/.hermes/scryfall/oracle-cards.jsonl.gz \
+  "https://data.scryfall.io/oracle-cards/oracle-cards-YYYYMMDDHHMMSS.jsonl.gz"
+gunzip -f ~/.hermes/scryfall/oracle-cards.jsonl.gz
+```
+
+Or use a crontab for automatic monthly updates:
+
+```shell
+# Run on the 1st of every month at 3am
+0 3 1 * * /path/to/scryfall update
+```
+
 ## Using with Local LLMs
 
-`scryfall` pairs well with local language models (LM Studio, Ollama, etc.) for private deckbuilding brainstorming. Run card searches in your terminal while chatting with your local model — no data leaves your machine.
+`scryfall` pairs well with local language models (LM Studio, Ollama, Open WebUI, etc.) for private deckbuilding brainstorming. Run card searches in your terminal while chatting with your local model — no data leaves your machine.
 
-```bash
+```shell
 # Look up cards, then paste the results into your LM session
 scryfall text "whenever a creature enters" --legal commander --limit 5
 ```
+
+### Open Web UI Integration
+
+There is also an [OpenWebUI Tool version](https://github.com/pigarmahdar/scryfall-local/tree/main/openwebui) that brings the same search capabilities directly into your chat interface. See the `openwebui/` folder for installation instructions.
 
 ## Fuzzy Search
 
 The `fuzzy` command uses Scryfall's API to handle typos, misspellings, and partial card names. It works in two stages:
 
-1. **Direct fuzzy match** — Scryfall tries to find a single unambiguous match for your query. Minor typos like extra/missing letters work great (`thragtuskk` → Thragtusk).
+1. **Fuzzy match** — queries Scryfall's `/cards/named?fuzzy=` endpoint
+2. **Autocomplete** — if fuzzy fails, tries Scryfall's autocomplete API and presents suggestions
 
-2. **Autocomplete fallback** — If no direct match is found, it calls Scryfall's autocomplete endpoint to suggest close matches. You pick a number and it looks up the full card.
+You pick a number and it looks up the full card.
 
-A sanity check prevents Scryfall's occasional wild guesses (e.g. "sol rng" → Oathsworn Giant) from being accepted silently — if the suggested card doesn't resemble your input, it falls through to autocomplete.
-
-```bash
-scryfall fuzzy "thragtusk"     # Direct match
-scryfall fuzzy "thragtuskk"    # Typo → still finds Thragtusk
-scryfall fuzzy "sol rng"       # Autocomplete → pick Sol Ring
-scryfall fuzzy "swords to plowshare"  # Missing letter → Swords to Plowshares
+```shell
+$ scryfall fuzzy "craterhoof behemuth"
+  Searching for: "craterhoof behemuth"
+  ✓ Found: Craterhoof Behemoth
 ```
-
-**Note:** The `fuzzy` command requires an internet connection (it calls the Scryfall API). All other commands work fully offline.
 
 ## Data Source
 
 Card data is sourced from [Scryfall](https://scryfall.com), the best open MTG card database. The Oracle cards file contains one entry per unique card (~38,000+ cards).
 
-### Updating the cache
-
-Download a fresh copy periodically to stay current with new sets:
-
-```bash
-curl -o ~/.hermes/scryfall/oracle-cards.jsonl \
-  "https://data.scryfall.io/oracle-cards/oracle-cards.jsonl"
-```
-
-Bulk data is refreshed every 12–24 hours by Scryfall.
+Bulk data is refreshed every 12–24 hours by Scryfall. Prices become stale after 24 hours, but gameplay data (Oracle text, types, legalities) is stable for weeks.
 
 ## Requirements
 
 - Python 3.6+ (pre-installed on macOS and most Linux distributions)
-- ~190 MB disk space for the Oracle cards cache
+- ~200 MB disk space for the Oracle cards cache
 
 ## License
 
@@ -173,4 +173,4 @@ Card data is copyright Wizards of the Coast. Scryfall bulk data is provided unde
 
 ---
 
-*Built as part of [Kwain.gg](https://kwain.gg) — a project about generosity, attention, and play.*
+*Built as part of [Kwain.gg](https://kwain.gg/) — a project about generosity, attention, and play.*

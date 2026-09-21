@@ -14,13 +14,15 @@ Commands:
   fuzzy <query>        Fuzzy name search (handles typos, partial names)
   random              Get a random card
   search <query>      General search across name + text + type
+  price <query>       Search by name, showing market prices
   update              Update the Oracle cache from Scryfall
 
 Options:
   --limit N           Max results (default: 10)
-  --commander <WUBRG> Filter to cards legal in those colours
+  --commander <WUBRG> Cards whose colour identity fits within these colours
   --legal <format>    Only cards legal in a format (commander, modern, etc.)
   --exact             Exact name match only (for 'name' command)
+  --sort <field>      Sort results by: name, cmc, price (default: database order; price desc for price command)
 
 Examples:
   scryfall name "Gilded Drake"
@@ -34,6 +36,8 @@ Examples:
   scryfall name "Sol Ring" --legal commander --limit 5
   scryfall fuzzy "sol rng"
   scryfall fuzzy "jac bele"
+  scryfall price "Sol Ring"
+  scryfall price "treasure" --sort price
 """
 
 import gzip
@@ -85,6 +89,7 @@ def display_card(card, index=None):
     name = card.get("name", "Unknown")
     mana = card.get("mana_cost", "—")
     cmc = card.get("cmc", "?")
+    cmc_display = int(cmc) if isinstance(cmc, (int, float)) and cmc == int(cmc) else cmc
     type_line = card.get("type_line", "—")
     oracle = card.get("oracle_text", "—")
     power = card.get("power")
@@ -105,7 +110,7 @@ def display_card(card, index=None):
 
     # Build output
     prefix = f"  [{index}] " if index is not None else "  "
-    print(f"\n{prefix}\033[1;33m{name}\033[0m  {mana}  (CMC {cmc})")
+    print(f"\n{prefix}\033[1;33m{name}\033[0m  {mana}  (CMC {cmc_display})")
     print(f"       {type_line}{pt}")
     print(f"       {colour_str}")
     if keywords:
@@ -338,6 +343,7 @@ def display_api_card(card):
     name = card.get("name", "Unknown")
     mana = card.get("mana_cost", "—")
     cmc = card.get("cmc", "?")
+    cmc_display = int(cmc) if isinstance(cmc, (int, float)) and cmc == int(cmc) else cmc
     type_line = card.get("type_line", "—")
     oracle = card.get("oracle_text", "—")
     power = card.get("power")
@@ -351,7 +357,7 @@ def display_api_card(card):
     legal_formats = [f for f, v in legalities.items() if v == "legal" and f in ("commander", "modern", "legacy", "pauper", "vintage")]
     legal_str = ", ".join(legal_formats) if legal_formats else "none"
 
-    print(f"\n  \033[1;33m{name}\033[0m  {mana}  (CMC {cmc})")
+    print(f"\n  \033[1;33m{name}\033[0m  {mana}  (CMC {cmc_display})")
     print(f"       {type_line}{pt}")
     print(f"       {colour_str}")
     if keywords:
@@ -360,11 +366,56 @@ def display_api_card(card):
     print(f"       Legal: {legal_str}")
     print(f"       {card.get('scryfall_uri', '')}")
 
+# ── Price display ─────────────────────────────────────────────────────
+def format_price(value, symbol="$"):
+    """Format a price string with currency symbol, or return '—' for None/null."""
+    if value is None:
+        return "—"
+    try:
+        amount = float(value)
+        return f"{symbol}{amount:,.2f}"
+    except (ValueError, TypeError):
+        return "—"
+
+def display_price_card(card, index=None):
+    """Display a card with prices prominent."""
+    name = card.get("name", "Unknown")
+    mana = card.get("mana_cost", "—")
+    type_line = card.get("type_line", "—")
+    cmc = card.get("cmc", "?")
+    cmc_display = int(cmc) if isinstance(cmc, (int, float)) and cmc == int(cmc) else cmc
+    colors = card.get("color_identity", [])
+    prices = card.get("prices", {})
+
+    colour_str = " ".join(COLOUR_SYMBOLS.get(c, c) for c in colors) if colors else "—"
+
+    usd = format_price(prices.get("usd"), "$")
+    usd_foil = format_price(prices.get("usd_foil"), "$")
+    eur = format_price(prices.get("eur"), "€")
+    eur_foil = format_price(prices.get("eur_foil"), "€")
+    tix = format_price(prices.get("tix"), "")
+
+    prefix = f"  [{index}] " if index is not None else "  "
+    print(f"\n{prefix}\033[1;33m{name}\033[0m  {mana}  (CMC {cmc_display})")
+    print(f"       {type_line}  •  {colour_str}")
+
+    # Price line — only show foil if it has a value
+    usd_part = f"USD {usd}"
+    if usd_foil != "—":
+        usd_part += f" (foil {usd_foil})"
+    eur_part = f"EUR {eur}"
+    if eur_foil != "—":
+        eur_part += f" (foil {eur_foil})"
+    tix_part = f"TIX {tix}"
+
+    print(f"       \033[1;32m{usd_part}\033[0m  •  {eur_part}  •  {tix_part}")
+    print(f"       {card.get('scryfall_uri', '')}")
+
 # ── Apply filters ───────────────────────────────────────────────────────
 def apply_filters(results, commander=None, legal=None):
     if commander:
-        commander = set(commander.upper())
-        results = [c for c in results if commander.issubset(set(c.get("color_identity", [])))]
+        allowed = set(commander.upper())
+        results = [c for c in results if set(c.get("color_identity", [])).issubset(allowed)]
     if legal:
         legal = legal.lower()
         results = [c for c in results if c.get("legalities", {}).get(legal) == "legal"]
@@ -375,7 +426,7 @@ def parse_args(args):
     """Parse command line arguments into (command, query, options)."""
     command = None
     query_parts = []
-    options = {"limit": 10, "commander": None, "legal": None, "exact": False}
+    options = {"limit": 10, "commander": None, "legal": None, "exact": False, "sort": None}
 
     i = 0
     while i < len(args):
@@ -395,6 +446,9 @@ def parse_args(args):
         elif arg == "--exact":
             options["exact"] = True
             i += 1
+        elif arg == "--sort" and i + 1 < len(args):
+            options["sort"] = args[i + 1].lower()
+            i += 2
         elif command is None:
             command = arg.lower()
             i += 1
@@ -497,6 +551,23 @@ def handle_update():
     print(f"    Size:  {size_mb:.1f} MB")
     print(f"    Cards: {line_count:,}\n")
 
+VALID_COMMANDS = {"name", "text", "type", "color", "cmc", "keyword", "fuzzy", "random", "search", "price", "update"}
+
+def sort_results(results, sort_key):
+    """Sort results by the given key."""
+    if sort_key == "name":
+        return sorted(results, key=lambda c: c.get("name", "").lower())
+    elif sort_key == "cmc":
+        return sorted(results, key=lambda c: c.get("cmc", 0))
+    elif sort_key == "price":
+        def usd_val(c):
+            p = c.get("prices", {}).get("usd")
+            return float(p) if p else 0
+        return sorted(results, key=usd_val, reverse=True)
+    else:
+        print(f"\n  \033[1;33m⚠ Unknown sort field '{sort_key}'. Use 'name', 'cmc', or 'price'.\033[0m")
+        return results
+
 # ── Main ────────────────────────────────────────────────────────────────
 def main():
     if len(sys.argv) < 2:
@@ -509,6 +580,19 @@ def main():
     if command == "update":
         handle_update()
         return
+
+    # Validate command (#4)
+    if command and command not in VALID_COMMANDS:
+        print(f"\n  \033[1;31m✗ Unknown command '{command}'.\033[0m")
+        print(f"  Valid commands: {', '.join(sorted(VALID_COMMANDS - {'update'}))}")
+        print(f"  Use 'scryfall search \"{command} {query}\"' for a general search.\n")
+        sys.exit(1)
+
+    # Guard empty queries (#1) — except random which needs no query
+    if command != "random" and not query.strip():
+        print(f"\n  \033[1;31m✗ No search query provided.\033[0m")
+        print(f"  Usage: scryfall {command} <query>\n")
+        sys.exit(1)
 
     # Load cards
     load_cards()
@@ -534,12 +618,18 @@ def main():
         results = search_random()
     elif command == "search":
         results = search_general(query)
-    else:
-        # If no valid command, treat the whole thing as a general search
-        results = search_general(f"{command} {' '.join(sys.argv[2:])}".strip())
+    elif command == "price":
+        results = search_name(query, exact=options["exact"])
+        # Default to price-sorted (most expensive first) when no sort specified
+        if not options["sort"]:
+            options["sort"] = "price"
 
     # Apply filters
     results = apply_filters(results, commander=options["commander"], legal=options["legal"])
+
+    # Apply sort (#5)
+    if options["sort"]:
+        results = sort_results(results, options["sort"])
 
     # Display
     if not results:
@@ -555,8 +645,9 @@ def main():
     else:
         print(f"\n  Found {total} result{'s' if total != 1 else ''}:")
 
+    display_fn = display_price_card if command == "price" else display_card
     for i, card in enumerate(results[:shown], 1):
-        display_card(card, index=i)
+        display_fn(card, index=i)
 
     print()  # trailing newline
 

@@ -8,13 +8,16 @@ Built for Magic: The Gathering players who want fast card lookups during deckbui
 
 - 🔍 **Search by name, text, type, colour, mana cost, or keyword**
 - 🔮 **Fuzzy name search** — handles typos, misspellings, and partial names
+- 💰 **Price lookup** — USD, EUR, and TIX with foil variants
 - 🎲 **Random card** generation
-- ⚡ **Instant** — loads 38,000+ cards in under a second
+- ⚡ **Instant** — loads 38,000+ cards in under two seconds
 - 🔒 **Offline** — works without internet once the cache is downloaded
 - 🎨 **Colour-coded output** with emoji symbols (⚪🔵⚫🔴🟢)
 - 🏛️ **Format filtering** — Commander, Modern, Legacy, Pauper, Vintage
 - 🧩 **Commander colour identity** filtering
+- 📊 **Sorting** — by name, mana value, or price
 - 🔄 **Built-in cache updater** — `scryfall update` fetches the latest data from Scryfall
+- 🛡️ **Input validation** — clear errors for empty queries and unknown commands
 
 ## Quick Start
 
@@ -61,6 +64,7 @@ scryfall random
 | `cmc` | Search by mana value (`=`, `<=`, `>=`) | `scryfall cmc <=3` |
 | `keyword` | Search by keyword ability | `scryfall keyword flash` |
 | `fuzzy` | Fuzzy name search (handles typos, partial names) | `scryfall fuzzy "sol rng"` |
+| `price` | Search by name with market prices | `scryfall price "Rhystic Study"` |
 | `random` | Get a random card | `scryfall random` |
 | `search` | General search across name + text + type | `scryfall search "2 mana green creature"` |
 | `update` | Update the Oracle cache from Scryfall | `scryfall update` |
@@ -70,9 +74,10 @@ scryfall random
 | Flag | Description | Example |
 |------|-------------|---------|
 | `--limit N` | Max results (default: 10) | `--limit 20` |
-| `--commander WUBRG` | Filter by commander colour identity | `--commander WU` |
+| `--commander WUBRG` | Cards whose colour identity fits within these colours | `--commander WU` |
 | `--legal <format>` | Only cards legal in a format | `--legal commander` |
 | `--exact` | Exact name match only (for `name` command) | `--exact` |
+| `--sort <field>` | Sort by `name`, `cmc`, or `price` (descending) | `--sort price` |
 
 ## Examples
 
@@ -100,6 +105,34 @@ scryfall fuzzy "jac bele"          # → Jace Beleren etc.
 # All flash creatures in blue
 scryfall keyword flash --commander U
 ```
+
+## Price Lookup
+
+The `price` command searches by card name and displays market prices prominently — USD, EUR, and TIX (Magic Online tickets), with foil prices shown when available.
+
+```shell
+# Look up prices for a specific card
+scryfall price "Force of Will"
+
+# Price-sorted results for a partial name
+scryfall price "bolt" --limit 5
+
+# Prices for cards in your colour identity
+scryfall price "draw" --commander WU --limit 10
+```
+
+Example output:
+
+```
+  [1] Force of Will  {3}{U}{U}  (CMC 5)
+       Instant  •  🔵
+       USD $60.09 (foil $71.56)  •  EUR €51.00 (foil €55.44)  •  TIX 16.99
+       https://scryfall.com/card/dmr/50/force-of-will
+```
+
+The `price` command sorts by USD value (most expensive first) by default. You can also add `--sort price` to any other command to order results by price.
+
+**Note:** Prices come from the Oracle cache and reflect the last `scryfall update`. Run `scryfall update` to refresh if prices seem stale.
 
 ## Updating the Cache
 
@@ -153,6 +186,14 @@ $ scryfall fuzzy "craterhoof behemuth"
   Searching for: "craterhoof behemuth"
   ✓ Found: Craterhoof Behemoth
 ```
+
+## Input Validation
+
+The tool validates your input and gives clear feedback:
+
+- **Empty queries** — tells you what's missing instead of dumping all 38,000 cards
+- **Unknown commands** — shows the list of valid commands and suggests `scryfall search` as a fallback
+- **Unknown sort fields** — warns and suggests valid options (`name`, `cmc`, `price`)
 
 ## Data Source
 

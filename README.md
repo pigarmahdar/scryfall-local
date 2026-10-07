@@ -10,6 +10,7 @@ Built for Magic: The Gathering players who want fast card lookups during deckbui
 - 🔮 **Fuzzy name search** — handles typos, misspellings, and partial names
 - 💰 **Price lookup** — USD, EUR, and TIX with foil variants
 - 🖼️ **Card image download** — grab high-res PNGs straight to your Desktop
+- 🤖 **LLM-ready output** — auto-detects agents vs humans; JSONL/JSON/CSV when piped
 - 🎲 **Random card** generation
 - ⚡ **Instant** — loads 38,000+ cards in under two seconds
 - 🔒 **Offline** — works without internet once the cache is downloaded
@@ -83,6 +84,58 @@ scryfall random
 | `--size <s\|n\|l\|png>` | Image size for `image`: small, normal, large, png (default: png) | `--size large` |
 | `--out <dir>` | Output directory for `image` (default: `~/Desktop`) | `--out ~/Pictures` |
 | `--border <color>` | Prefer a specific border colour for `image` (black, silver) | `--border silver` |
+| `--format <fmt>` | Output format: `pretty`, `json`, `jsonl`, `csv`, `tsv` (see [Machine-Readable Output](#machine-readable-output-for-llms--scripts)) | `--format json` |
+| `--json` / `--jsonl` / `--csv` / `--tsv` | Shorthands for the corresponding `--format` value | `--json` |
+| `--pretty` | Force human-styled output even when piped | `--pretty` |
+
+## Machine-Readable Output (for LLMs & scripts)
+
+`scryfall` is built to be a tool-calling companion for LLM harnesses, agents, and shell scripts — while staying pleasant for humans. The output format is chosen automatically:
+
+| Signal | Result |
+|--------|--------|
+| Run in a terminal (TTY) | Styled, colourful `pretty` output — unchanged from before |
+| stdout piped or redirected (agent, script, `\| jq`) | Compact **JSONL**, one card per line, automatically |
+| `SCRYFALL_FORMAT=json` (env var) | Format override for whole sessions/harness configs |
+| `--json` / `--jsonl` / `--csv` / `--tsv` / `--format <f>` | Explicit per-call override |
+| `--pretty` | Force styled output even when piping |
+
+Priority: **flag > `$SCRYFALL_FORMAT` > TTY auto-detect**. Colours additionally honour `NO_COLOR=1` and `TERM=dumb`.
+
+**Why it matters for LLMs:** JSONL is roughly half the tokens of styled text, has zero parsing ambiguity, streams line-by-line into prompts, and composes with `jq`. Warnings and meta-information go to **stderr**, so stdout is always pure data you can pipe anywhere.
+
+Each record uses stable, minimal fields:
+
+```json
+{"name": "Sol Ring", "lang": "en", "mana_cost": "{1}", "cmc": 1.0,
+ "type_line": "Artifact", "colors": [], "power": null, "toughness": null,
+ "oracle_text": "{T}: Add {C}{C}.", "keywords": [],
+ "legalities": {"commander": "legal", "modern": "not_legal"},
+ "prices": {"usd": 1.19, "eur": 1.08},
+ "image_uris": {"small": "...", "normal": "...", "large": "...", "png": "..."},
+ "scryfall_uri": "https://scryfall.com/card/..."}
+```
+
+Examples for agent pipelines:
+
+```shell
+# Names of every counter spell legal in Modern (no flag needed — piping triggers JSONL)
+scryfall search "counter target spell" --limit 500 | jq -r 'select(.legalities.modern=="legal") | .name'
+
+# Full array for programmatic use
+scryfall name "Force of Will" --json | jq '.[0].prices.usd'
+
+# Spreadsheet-bound: CSV of budget commander staples
+scryfall type "creature" --commander G --legal pauper --csv > underdogs.csv
+
+# fuzzy is non-interactive in machine mode: returns {query, match, candidates}
+scryfall fuzzy "sol rng" | jq '.match.name'          # → matched card or null + candidates
+
+# image returns the saved path instead of prose — chain it into vision models
+scryfall image "Sol Ring" --out /tmp/cards | jq -r '.saved'
+```
+
+The `update` command remains human-oriented (progress messages on stderr).
 
 ## Examples
 

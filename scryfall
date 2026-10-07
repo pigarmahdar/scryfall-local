@@ -15,6 +15,7 @@ Commands:
   random              Get a random card
   search <query>      General search across name + text + type
   price <query>       Search by name, showing market prices
+  image <name>        Download PNG image of a card (to Desktop by default)
   update              Update the Oracle cache from Scryfall
 
 Options:
@@ -23,6 +24,9 @@ Options:
   --legal <format>    Only cards legal in a format (commander, modern, etc.)
   --exact             Exact name match only (for 'name' command)
   --sort <field>      Sort results by: name, cmc, price (default: database order; price desc for price command)
+  --size <small|normal|large|png>  Image size for 'image' command (default: png)
+  --out <dir>         Output directory for 'image' command (default: ~/Desktop)
+  --border <black|silver>  Request a specific border colour for 'image'
 
 Examples:
   scryfall name "Gilded Drake"
@@ -38,6 +42,8 @@ Examples:
   scryfall fuzzy "jac bele"
   scryfall price "Sol Ring"
   scryfall price "treasure" --sort price
+  scryfall image "Sol Ring"
+  scryfall image "sol rng" --size large
 """
 
 import gzip
@@ -411,6 +417,175 @@ def display_price_card(card, index=None):
     print(f"       \033[1;32m{usd_part}\033[0m  •  {eur_part}  •  {tix_part}")
     print(f"       {card.get('scryfall_uri', '')}")
 
+# ── Image download ──────────────────────────────────────────────────────
+def _safe_filename(name):
+    """Turn a card name into a safe filename (keep spaces, strip path chars)."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", name)
+    return cleaned.strip() or "card"
+
+def _pick_image(card, size="png", border=None):
+    """Pick an image URI from a card dict. Returns (uri, ext) or (None, None)."""
+    uris = card.get("image_uris") or {}
+    # Some special cards (tokens, double-faced backs) store per-face URIs in
+    # `card_faces`. Fall back to the first face that has images.
+    if not uris and card.get("card_faces"):
+        for face in card["card_faces"]:
+            if face.get("image_uris"):
+                uris = face["image_uris"]
+                break
+
+    if not uris:
+        return None, None
+
+    # Order of preference by requested size
+    order = {
+        "small": ["small", "normal", "large", "png"],
+        "normal": ["normal", "large", "png", "small"],
+        "large": ["large", "png", "normal", "small"],
+        "png": ["png", "large", "normal", "small"],
+    }.get(size, ["png", "large", "normal", "small"])
+
+    uri = next((uris[k] for k in order if uris.get(k)), None)
+    if not uri:
+        return None, None
+
+    # Determine extension from the URL itself (e.g. .png vs .jpg)
+    path = urllib.parse.urlparse(uri).path.lower()
+    ext = ".png" if path.endswith(".png") else (".jpg" if path.endswith(".jpg") else ".bin")
+    return uri, ext
+
+def _similarity(query, name):
+    """Similarity score of query vs card name (0..1), with word-start bonus."""
+    q, n = query.lower(), name.lower()
+    ratio = difflib.SequenceMatcher(None, q, n).ratio()
+    # Bonus if every query word lines up with a word in the name
+    q_words = [w for w in re.split(r'\s+', q) if w]
+    n_words = re.split(r'\s+', n)
+    if q_words and all(any(nw.startswith(qw) or qw.startswith(nw) for nw in n_words) for qw in q_words):
+        return max(ratio, 0.95)
+    # Typo-tolerant: most query words found inside the name (e.g. "sol rng" → Sol Ring)
+    contained = sum(1 for qw in q_words if len(qw) >= 2 and qw in n)
+    if q_words and contained / len(q_words) >= 0.75:
+        return max(ratio, 0.85)
+    return ratio
+
+def _normalize_name(name):
+    """Lowercase, drop punctuation — used for closest-match comparison."""
+    return re.sub(r"[’'\".,!?|()/\\:-]", "", name.lower()).strip()
+
+def _api_closest_match(card, query):
+    """If the API returned an ambiguous result, pick the closest 'name' from its list."""
+    candidates = card.get("name")
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    q_norm = _normalize_name(query)
+    best = max(candidates, key=lambda c: _similarity(q_norm, _normalize_name(c)))
+    return best if _similarity(q_norm, _normalize_name(best)) >= 0.6 else None
+
+def handle_image(query, options):
+    """Resolve a card name and download its image."""
+    query = query.strip().strip('"')
+    if not query:
+        print("\n  Usage: scryfall image <card name> [--size small|normal|large|png] [--out <dir>] [--border black|silver]\n")
+        return
+
+    size = options.get("size", "png")
+    out_dir = os.path.expanduser(options.get("out") or "~/Desktop")
+    border = options.get("border")
+
+    # Step 1: Scryfall fuzzy lookup (handles typos + gives us image URLs)
+    api_card = scryfall_fuzzy(query)
+    if api_card and api_card.get("error"):
+        api_card = None
+    if api_card and isinstance(api_card.get("name"), list):
+        # Ambiguous match — API returned several candidate names; pick the best one
+        chosen = _api_closest_match(api_card, query)
+        api_card = scryfall_fuzzy(chosen) if chosen else None
+        if api_card and api_card.get("error"):
+            api_card = None
+    # Guard against unrelated printed-name coincidences (e.g. fuzzy "sol rng"
+    # returning a Portuguese card whose printed name starts with "Sol R")
+    if api_card and not isinstance(api_card.get("name"), list):
+        if _similarity(query, api_card.get("name", "")) < 0.55:
+            api_card = None
+
+    # Step 2: Local cache candidates (exact match wins outright)
+    local_exact = search_name(query, exact=True)
+    local_partial = [] if local_exact else search_name(query)
+
+    # Step 3: Typo tolerance — match each query word against cached card names
+    local_typo = []
+    if not local_exact and not local_partial and len(query.split()) >= 2:
+        q_words = [w.lower() for w in re.split(r'\s+', query) if len(w) >= 2]
+        for card in CARDS:
+            n_words = re.split(r'\s+', card.get("name", "").lower())
+            hits = sum(1 for qw in q_words
+                       if any(difflib.SequenceMatcher(None, qw, nw).ratio() >= 0.6 for nw in n_words))
+            if hits == len(q_words):
+                local_typo.append(card)
+
+    card = None
+    sim = 0.0
+    if local_exact:
+        card = local_exact[0]
+        sim = 1.0
+    elif api_card and not isinstance(api_card.get("name"), list):
+        sim = _similarity(query, api_card.get("name", ""))
+        card = api_card
+    elif local_typo:
+        best = max(local_typo, key=lambda c: _similarity(query, c.get("name", "")))
+        card = best
+        sim = _similarity(query, best.get("name", ""))
+
+    # Step 3: Fall back to the best partial match from the local cache
+    if card is None and local_partial:
+        best = max(local_partial, key=lambda c: _similarity(query, c.get("name", "")))
+        card = best
+        sim = _similarity(query, best.get("name", ""))
+
+    if card is None:
+        print(f"\n  \033[1;31m✗ Could not find a card matching \"{query}\".\033[0m\n")
+        return
+
+    name = card.get("name", "Unknown")
+    note = "" if sim >= 0.9 else f"  \033[2m(from \"{query}\")\033[0m"
+    print(f"\n  \033[1mCard:\033[0m {name}{note}")
+
+    # If a border is requested, ask the API for that specific version
+    if border:
+        set_code = (card.get("set") or "").upper()
+        api_card = _api_get("/cards/named", {"exact": name, "set": set_code}) if set_code else None
+        if api_card and not api_card.get("error") and api_card.get("border") == border:
+            card = api_card
+        else:
+            print(f"  \033[1;33m⚠ No {border}-border version found; using default.\033[0m")
+
+    uri, ext = _pick_image(card, size=size)
+    if not uri:
+        print(f"  \033[1;31m✗ No image available for this card.\033[0m\n")
+        return
+
+    # Build output path — avoid clobbering existing files
+    os.makedirs(out_dir, exist_ok=True)
+    base = _safe_filename(name)
+    out_path = os.path.join(out_dir, f"{base}{ext}")
+    counter = 1
+    while os.path.exists(out_path):
+        out_path = os.path.join(out_dir, f"{base} ({counter}){ext}")
+        counter += 1
+
+    print(f"  \033[2mSource:\033[0m {uri}")
+    try:
+        req = urllib.request.Request(uri, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=60) as resp, open(out_path, "wb") as f:
+            shutil.copyfileobj(resp, f)
+    except Exception as e:
+        print(f"  \033[1;31m✗ Download failed: {e}\033[0m\n")
+        return
+
+    size_kb = os.path.getsize(out_path) / 1024
+    print(f"  \033[1;32m✓ Saved:\033[0m {out_path}  (\033[2m{size_kb:.0f} KB\033[0m)\n")
+
 # ── Apply filters ───────────────────────────────────────────────────────
 def apply_filters(results, commander=None, legal=None):
     if commander:
@@ -426,7 +601,8 @@ def parse_args(args):
     """Parse command line arguments into (command, query, options)."""
     command = None
     query_parts = []
-    options = {"limit": 10, "commander": None, "legal": None, "exact": False, "sort": None}
+    options = {"limit": 10, "commander": None, "legal": None, "exact": False, "sort": None,
+               "size": None, "out": None, "border": None}
 
     i = 0
     while i < len(args):
@@ -448,6 +624,15 @@ def parse_args(args):
             i += 1
         elif arg == "--sort" and i + 1 < len(args):
             options["sort"] = args[i + 1].lower()
+            i += 2
+        elif arg == "--size" and i + 1 < len(args):
+            options["size"] = args[i + 1].lower()
+            i += 2
+        elif arg == "--out" and i + 1 < len(args):
+            options["out"] = args[i + 1]
+            i += 2
+        elif arg == "--border" and i + 1 < len(args):
+            options["border"] = args[i + 1].lower()
             i += 2
         elif command is None:
             command = arg.lower()
@@ -551,7 +736,7 @@ def handle_update():
     print(f"    Size:  {size_mb:.1f} MB")
     print(f"    Cards: {line_count:,}\n")
 
-VALID_COMMANDS = {"name", "text", "type", "color", "cmc", "keyword", "fuzzy", "random", "search", "price", "update"}
+VALID_COMMANDS = {"name", "text", "type", "color", "cmc", "keyword", "fuzzy", "random", "search", "price", "image", "update"}
 
 def sort_results(results, sort_key):
     """Sort results by the given key."""
@@ -579,6 +764,12 @@ def main():
     # Handle update command (doesn't need card data)
     if command == "update":
         handle_update()
+        return
+
+    # Handle image command (uses API first, local cache as fallback)
+    if command == "image":
+        load_cards()
+        handle_image(query, options)
         return
 
     # Validate command (#4)

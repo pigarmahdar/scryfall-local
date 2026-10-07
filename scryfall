@@ -424,22 +424,35 @@ def handle_fuzzy(query, options=None):
 
     matched_name = None
     if result and not result.get("error"):
-        # Sanity check: is the returned name actually similar to the query?
         name = result.get("name", "Unknown")
-        ratio = difflib.SequenceMatcher(None, query.lower(), name.lower()).ratio()
-        query_words = set(w.lower() for w in query.split() if len(w) >= 3)
-        name_lower = name.lower()
-        has_word_overlap = any(w in name_lower or name_lower.startswith(w[:4]) for w in query_words)
+        if isinstance(name, str):
+            # Sanity check: is the returned name actually similar to the query?
+            ratio = difflib.SequenceMatcher(None, query.lower(), name.lower()).ratio()
+            query_words = set(w.lower() for w in query.split() if len(w) >= 3)
+            name_lower = name.lower()
+            has_word_overlap = any(w in name_lower or name_lower.startswith(w[:4]) for w in query_words)
 
-        if ratio >= 0.55 or has_word_overlap:
-            matched_name = name
-        elif not machine_mode():
-            # Fuzzy returned something unrelated — treat as no match
-            print("  " + c(fmt("~ Scryfall suggested '{}' but it doesn't match your query.", name), '1;33') + "\n")
+            if ratio >= 0.55 or has_word_overlap:
+                matched_name = name
+            else:
+                # Fuzzy returned something unrelated — treat as no match
+                if not machine_mode():
+                    print("  " + c(fmt("~ Scryfall suggested '{}' but it doesn't match your query.", name), '1;33') + "\n")
+        elif isinstance(name, list):
+            # Ambiguous response — resolve to the closest candidate name
+            chosen = _api_closest_match(result, query)
+            if chosen:
+                resolved = scryfall_fuzzy(chosen)
+                if resolved and not resolved.get("error") and isinstance(resolved.get("name"), str):
+                    result = resolved
+                    matched_name = resolved["name"]
 
     # Step 2: Gather autocomplete suggestions (candidates)
     suggestions = []
-    if matched_name is None:
+    if matched_name is None and query.strip():
+        # Scryfall's q= param treats leading "-" as negation; quote the query
+        suggestions = scryfall_autocomplete('"' + query.strip('"') + '"')
+    if matched_name is None and not suggestions:
         suggestions = scryfall_autocomplete(query)
         if not suggestions:
             words = [w for w in query.split() if len(w) >= 3]
@@ -448,10 +461,21 @@ def handle_fuzzy(query, options=None):
                 if suggestions:
                     break
 
+    # Step 2b: Local fallback — word-level typo matching against the cache
+    # (rescues queries like "sol rng" / "jac bele" where Scryfall's own fuzzy
+    # endpoint returns nothing useful)
+    local_fallback_card = None
+    if matched_name is None:
+        candidate, sim = _resolve_card(query)
+        if candidate is not None and sim >= 0.85:
+            local_fallback_card = candidate
+
     # ── Machine mode: emit structured result, never prompt ──
     if machine_mode():
         card = None
-        if matched_name:
+        if local_fallback_card is not None:
+            card = local_fallback_card
+        elif matched_name:
             local = search_name(matched_name, exact=True)
             card = local[0] if local else (result if result and not result.get("error") else None)
         payload = {"query": query,
@@ -1032,6 +1056,15 @@ def main():
         # Default to price-sorted (most expensive first) when no sort specified
         if not options["sort"]:
             options["sort"] = "price"
+        if machine_mode():
+            # Numeric prices for clean comparisons; keep every field from the projector
+            for r in results:
+                p = r.get("prices", {})
+                for k in ("usd", "usd_foil", "usd_etched", "eur", "eur_foil", "tix"):
+                    try:
+                        p[k] = float(p[k]) if p.get(k) is not None else None
+                    except (TypeError, ValueError):
+                        p[k] = None
 
     # Apply filters
     results = apply_filters(results, commander=options["commander"], legal=options["legal"])

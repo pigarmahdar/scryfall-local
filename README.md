@@ -10,7 +10,7 @@ Built for Magic: The Gathering players who want fast card lookups during deckbui
 - 🔮 **Fuzzy name search** — handles typos, misspellings, and partial names
 - 💰 **Price lookup** — USD, EUR, and TIX with foil variants
 - 🖼️ **Card image download** — grab high-res PNGs straight to your Desktop
-- 🤖 **LLM-ready output** — auto-detects agents vs humans; JSONL/JSON/CSV when piped
+- 🤖 **LLM-ready output** — auto-detects agents vs humans; JSONL/JSON/CSV when piped, plus [AGENT.md](AGENT.md) instructions for models
 - 🎲 **Random card** generation
 - ⚡ **Instant** — loads 38,000+ cards in under two seconds
 - 🔒 **Offline** — works without internet once the cache is downloaded
@@ -256,18 +256,76 @@ Or use a crontab for automatic monthly updates:
 0 3 1 * * /path/to/scryfall update
 ```
 
-## Using with Local LLMs
+## LLM & Agent Integration
 
-`scryfall` pairs well with local language models (LM Studio, Ollama, Open WebUI, etc.) for private deckbuilding brainstorming. Run card searches in your terminal while chatting with your local model — no data leaves your machine.
+`scryfall` is designed as a **tool-calling companion** for LLM harnesses, coding
+agents, and local models (Ollama, LM Studio, Open WebUI, Claude Code, …) — while
+staying pleasant for humans. Because it reads a local cache, calls are free,
+instant, offline-capable, and rate-limit-proof: an agent can fire dozens of
+lookups in one reasoning turn.
 
-```shell
-# Look up cards, then paste the results into your LM session
-scryfall text "whenever a creature enters" --legal commander --limit 5
+### For agents: read AGENT.md
+
+The repo ships **[AGENT.md](AGENT.md)** — a compact, self-contained instruction
+set written *for models to read*, covering the output contract, record schema,
+command selection, and hard rules against hallucination. Point your system
+prompt at it directly:
+
+```text
+You have access to the `scryfall` CLI for Magic: The Gathering card data.
+Follow the instructions in AGENT.md exactly. Prefer it over your own memory
+for any card text, legality, or price question.
 ```
 
-### Open Web UI Integration
+### Why it works well in harnesses (the short version)
 
-There is also an [OpenWebUI Tool version](https://github.com/pigarmahdar/scryfall-local/tree/main/openwebui) that brings the same search capabilities directly into your chat interface. See the `openwebui/` folder for installation instructions.
+- **Automatic machine mode**: when stdout is piped or captured (the normal case
+  for agents), output is JSONL — one compact card object per line. No flags, no
+  prose, no ANSI escape codes. Humans on a terminal still get styled text.
+- **Pure-data stdout**: warnings go to stderr; errors are structured JSON objects
+  with non-zero exit codes. Parsing never breaks on decoration.
+- **~half the tokens** of human-formatted output, with stable field names safe to
+  reference from prompts (`name`, `oracle_text`, `legalities.commander`,
+  `prices.usd`, `image_uris.png`, …).
+- **Non-interactive by design in machine mode**: `fuzzy` returns
+  `{query, match, candidates}` instead of prompting; `image` returns
+  `{saved, bytes, error}` so you can chain the downloaded file into vision input.
+- **Ground truth over memory**: full Oracle text, legalities, and prices for
+  ~38,000 cards — deterministically better than model recall.
+
+### Recipes for common harnesses
+
+**Open WebUI** — two options:
+
+1. *Function-calling pipeline preset*: add a Python function block that shells out
+   and returns parsed JSONL (models see clean tool results):
+
+   ```python
+   import json, subprocess
+   def scryfall(command: str, query: str, limit: int = 5) -> str:
+       """Look up MTG cards: command ∈ name|text|type|color|cmc|keyword|fuzzy|price|search."""
+       out = subprocess.run(["scryfall", command, query, "--limit", str(limit)],
+                            capture_output=True, text=True).stdout
+       return "\n".join(json.loads(l)["name"] + " :: " + json.loads(l)["oracle_text"]
+                         for l in out.splitlines())
+   ```
+
+2. *Bash-tool route*: give the model shell access plus the AGENT.md preamble —
+   set `SCRYFALL_FORMAT=jsonl` in the environment for belt-and-braces.
+
+   A dedicated [OpenWebUI Tool version](https://github.com/pigarmahdar/scryfall-local/tree/main/openwebui)
+   also exists — see the `openwebui/` folder.
+
+**Claude Code / generic bash agents** — add to `CLAUDE.md` or project instructions:
+
+```text
+MTG card questions: run `scryfall <cmd> "<query>" --limit N`. Piped output is
+JSONL — parse with jq. See AGENT.md for the full contract. Never answer card
+text, legality, or price from memory.
+```
+
+**MCP clients** — plain bash tool access is sufficient today; an MCP server
+wrapper exposing these commands as typed tools is on the roadmap.
 
 ## Fuzzy Search
 

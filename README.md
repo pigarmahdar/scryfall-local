@@ -9,6 +9,7 @@ Built for Magic: The Gathering players who want fast card lookups during deckbui
 - 🔍 **Search by name, text, type, colour, mana cost, or keyword**
 - 🔮 **Fuzzy name search** — handles typos, misspellings, and partial names
 - 💰 **Price lookup** — USD, EUR, and TIX with foil variants
+- 🖼️ **Card image download** — grab high-res PNGs straight to your Desktop
 - 🎲 **Random card** generation
 - ⚡ **Instant** — loads 38,000+ cards in under two seconds
 - 🔒 **Offline** — works without internet once the cache is downloaded
@@ -65,6 +66,7 @@ scryfall random
 | `keyword` | Search by keyword ability | `scryfall keyword flash` |
 | `fuzzy` | Fuzzy name search (handles typos, partial names) | `scryfall fuzzy "sol rng"` |
 | `price` | Search by name with market prices | `scryfall price "Rhystic Study"` |
+| `image` | Download a card's image (PNG to Desktop) | `scryfall image "Sol Ring"` |
 | `random` | Get a random card | `scryfall random` |
 | `search` | General search across name + text + type | `scryfall search "2 mana green creature"` |
 | `update` | Update the Oracle cache from Scryfall | `scryfall update` |
@@ -78,6 +80,9 @@ scryfall random
 | `--legal <format>` | Only cards legal in a format | `--legal commander` |
 | `--exact` | Exact name match only (for `name` command) | `--exact` |
 | `--sort <field>` | Sort by `name`, `cmc`, or `price` (descending) | `--sort price` |
+| `--size <s\|n\|l\|png>` | Image size for `image`: small, normal, large, png (default: png) | `--size large` |
+| `--out <dir>` | Output directory for `image` (default: `~/Desktop`) | `--out ~/Pictures` |
+| `--border <color>` | Prefer a specific border colour for `image` (black, silver) | `--border silver` |
 
 ## Examples
 
@@ -101,6 +106,9 @@ scryfall random
 scryfall fuzzy "sol rng"           # → Sol Ring
 scryfall fuzzy "thragtuskk"        # → Thragtusk
 scryfall fuzzy "jac bele"          # → Jace Beleren etc.
+
+# Download a card image to your Desktop
+scryfall image "Sol Ring"          # → ~/Desktop/Sol Ring.png
 
 # All flash creatures in blue
 scryfall keyword flash --commander U
@@ -133,6 +141,42 @@ Example output:
 The `price` command sorts by USD value (most expensive first) by default. You can also add `--sort price` to any other command to order results by price.
 
 **Note:** Prices come from the Oracle cache and reflect the last `scryfall update`. Run `scryfall update` to refresh if prices seem stale.
+
+## Card Images
+
+The `image` command downloads a card's picture — PNG by default — straight to your **Desktop**:
+
+```shell
+# Highest-quality PNG → ~/Desktop/Sol Ring.png
+scryfall image "Sol Ring"
+
+# Typo? No problem — resolves via fuzzy match + local fallbacks
+scryfall image "sol rng"              # → Sol Ring.png
+scryfall image "jace bele"            # → Jace Beleren.png
+
+# Smaller JPEG instead of PNG
+scryfall image "Lightning Bolt" --size large
+
+# Save somewhere else
+scryfall image "Force of Will" --out ~/Pictures
+```
+
+Example output:
+
+```
+  Card: Sol Ring
+  Source: https://cards.scryfall.io/png/front/8/e/8ee443cc-e17a-493b-9c93-1f9e141a30e4.png
+  ✓ Saved: /Users/you/Desktop/Sol Ring.png  (753 KB)
+```
+
+How it works:
+
+1. **Name resolution** in three tiers — exact match in your local cache first (instant, offline), then Scryfall's fuzzy API for typos, then a local word-similarity fallback that catches cases where the API returns an unrelated printed-name coincidence
+2. **Size selection** — `--size small|normal|large|png` (default `png`, the high-res version). The file extension always matches the real format (`.png` vs `.jpg`)
+3. **Collision-safe** — never overwrites existing files; adds ` (1)`, ` (2)`, … as needed
+4. **Double-faced cards** — uses the front face's image when a card stores images per face
+
+Unlike the rest of the tool, `image` needs an internet connection to fetch the picture itself (Scryfall hosts the images on their CDN).
 
 ## Updating the Cache
 

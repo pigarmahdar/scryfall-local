@@ -5,3 +5,11 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# Virtual environment (dev workspace — never commit)
+.venv/
+
+# Derived data: SQLite sidecar / index caches built from the oracle JSONL
+oracle-cards.db
+oracle-cards.db-*
+*.idx.marshal

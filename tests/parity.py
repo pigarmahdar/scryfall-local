@@ -157,6 +157,42 @@ FUZZY_RESOLVE = [  # exercises _resolve_card's exact/partial/typo steps (offline
     "molten rn", "karn scion urza", "grist the hunger tide",
 ]
 
+ORACLE_QUERIES = [  # `oracle` groups by canonical text; exact path grouped, substr flat
+    "sol ring", "Sol Ring", "elemental", "sheep", "golem", "spirit", "bird",
+    "bolt", "ring", "land", "dragon", "lightening bolt", "murgish",
+    # 1-2 char: substr blow-up + the trigram silent-zero trap (§3.3)
+    "a", "so", "xx",
+    # punctuation / accents / LIKE metacharacters
+    "sisters'", "kamahl,", "ömnoms", "d'vir", "100%", "underworld_", "%", "_",
+    # quotes and whitespace
+    '"sol ring"', "sol  ring", " sol ring ", "",
+]
+
+
+def compare_oracle(case, query):
+    """`search_oracle` returns (records, total, mode); compare all three in order."""
+    fn = cli.search_oracle
+
+    cli.DB_MODE = False
+    l_recs, l_tot, l_mode = fn(query)
+    cli.DB_MODE = True
+    d_recs, d_tot, d_mode = fn(query)
+
+    lp = [(cli.text_card(c), n) for c, n in l_recs]
+    dp = [(cli.text_card(c), n) for c, n in d_recs]
+    if lp != dp:
+        return Result(case, False, describe_diff([p[0] for p in lp], [p[0] for p in dp],
+                                                  l_recs, d_recs))
+    if [n for _, n in lp] != [n for _, n in dp]:
+        return Result(case, False, "printing counts differ")
+    if l_tot != d_tot or l_mode != d_mode:
+        return Result(case, False, "total/mode differ: %s/%s vs %s/%s"
+                      % (l_tot, l_mode, d_tot, d_mode))
+    if not lp:
+        return Result(case, True, "both empty (suspicious: query matched nothing)")
+    return Result(case, True, "%d groups / %d printings (%s)"
+                  % (len(lp), sum(n for _, n in lp), l_mode))
+
 
 def main():
     verbose = "-v" in sys.argv
@@ -212,6 +248,8 @@ def main():
                               "" if ok else "jsonl err=%r db err=%r" % (ea, eb)))
     for q in GENERAL_QUERIES:
         results.append(compare("search %r" % q, "search_general", (q,)))
+    for q in ORACLE_QUERIES:
+        results.append(compare_oracle("oracle %r" % q, q))
 
     # random: same shape + membership, not identity (it is random)
     cli.DB_MODE = False

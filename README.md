@@ -65,6 +65,7 @@ scryfall random
 | `color` | Search by colour identity (WUBRG letters) | `scryfall color WG` |
 | `cmc` | Search by mana value (`=`, `<=`, `>=`) | `scryfall cmc <=3` |
 | `keyword` | Search by keyword ability | `scryfall keyword flash` |
+| `oracle` | Canonical card text only, deduplicated across printings | `scryfall oracle "Sol Ring"` |
 | `fuzzy` | Fuzzy name search (handles typos, partial names) | `scryfall fuzzy "sol rng"` |
 | `price` | Search by name with market prices | `scryfall price "Rhystic Study"` |
 | `image` | Download a card's image (PNG to Desktop) | `scryfall image "Sol Ring"` |
@@ -204,7 +205,49 @@ scryfall image "Sol Ring"          # → ~/Desktop/Sol Ring.png
 
 # All flash creatures in blue
 scryfall keyword flash --commander U
+
+# Just the rules text, no price/legality noise
+scryfall oracle "Sol Ring"
 ```
+
+## Canonical Text Lookup (`oracle`)
+
+`oracle` answers one question — *what does this card actually do?* — and nothing else.
+It returns the rules text plus the fields needed to read it (name, mana cost, type
+line, P/T, colours, keywords), omitting legalities, prices, image URIs, and the
+Scryfall web link. That projection is roughly **85% smaller** than a `name` lookup:
+177 bytes versus 1,146 for Sol Ring, which matters when every card costs context
+tokens in an LLM session.
+
+```shell
+scryfall oracle "Sol Ring"
+#   Sol Ring  {1}  ·  CMC 1
+#     Artifact
+#     {T}: Add {C}{C}.
+```
+
+Identical printings collapse into a single record, tagged with a `printings` count:
+
+```shell
+scryfall oracle "Sheep"          # 3 cached printings -> 1 record, "3 printings"
+scryfall oracle "Elemental"       # 31 printings -> 13 records
+```
+
+The collapse groups on canonical text, not on printing identity, so it is lossless:
+same-name cards that genuinely differ (the 13 distinct Elementals) stay separate.
+Because this cache holds one row per oracle card rather than one row per printing,
+`oracle` is a *text* deduplicator, not a reprint browser — use `name` when you want
+every printing.
+
+Two behaviours worth knowing:
+
+- **Exact name first, substring second.** `oracle "ring"` finds no card literally
+  named "ring", so it falls back to listing names containing it. For typos use
+  `fuzzy`, which consults Scryfall; `oracle` never touches the network.
+- **Single-card flags do not apply.** `--commander`, `--legal`, and `--sort` are
+  browse-time filters, so `oracle` warns on stderr and ignores them. Output is
+  `pretty` / `json` / `jsonl`; `--csv` and `--tsv` return a structured
+  `unsupported_format` error rather than inventing a column set.
 
 ## Price Lookup
 

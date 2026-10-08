@@ -11,6 +11,7 @@ Commands:
   color <W|U|B|R|G>  Search by colour identity (combine letters, e.g. WG)
   cmc <number>        Search by mana value (exact or <=  / >=)
   keyword <query>     Search by keyword (Flying, Trample, etc.)
+  oracle <name>       Canonical card text only, deduplicated across printings
   fuzzy <query>        Fuzzy name search (handles typos, partial names)
   random              Get a random card
   search <query>      General search across name + text + type
@@ -51,6 +52,8 @@ Examples:
   scryfall random
   scryfall search "2 mana green creature"
   scryfall name "Sol Ring" --legal commander --limit 5
+  scryfall oracle "Sol Ring"
+  scryfall oracle "Elemental" --limit 999
   scryfall fuzzy "sol rng"
   scryfall fuzzy "jac bele"
   scryfall price "Sol Ring"
@@ -184,6 +187,20 @@ def slim_card(card):
         "image_uris": image_uris,
         "scryfall_uri": card.get("scryfall_uri", ""),
     }
+
+# Canonical rules-text projection: what the card DOES, and nothing else. Drops
+# lang/color_identity/legalities/prices/image_uris/scryfall_uri from slim_card()
+# because the 'oracle' command answers "what does this card actually do?", where
+# a 352-byte legalities blob and a price map are pure noise. Measured on Sol Ring:
+# 1,145 bytes (slim) -> 176 bytes here, ~85% smaller. Built by reusing slim_card()
+# so DFC face handling and numeric coercion stay single-sourced.
+TEXT_FIELDS = ("name", "mana_cost", "cmc", "type_line", "colors",
+               "power", "toughness", "oracle_text", "keywords")
+
+def text_card(card):
+    """Project a card down to its canonical rules text (see TEXT_FIELDS)."""
+    s = slim_card(card)
+    return {k: s[k] for k in TEXT_FIELDS}
 
 CSV_COLUMNS = ["name", "lang", "mana_cost", "cmc", "type_line", "colors", "color_identity",
                "power", "toughness", "oracle_text", "keywords",
@@ -513,6 +530,90 @@ def _any_substr_rows(query):
            " ORDER BY rid")
     return DB.execute(sql, {"p": _like_pattern(q)}).fetchall()
 
+# ── Canonical card-text lookup (`oracle`) ────────────────────────────────
+# Grouping key for "same canonical card". The roadmap assumed an `oracle_id`
+# column would do this; measured against the real cache it cannot: oracle_id is
+# 1:1 with rid (38,708 distinct values over 38,708 rows, max group size 1), so
+# GROUP BY oracle_id is a no-op. This cache is oracle-scoped, not prints-scoped.
+# What actually identifies a canonical card here is its rules text, so group on
+# (name, oracle_text, type_line, mana_cost) — derived at query time from the
+# stored JSON rather than promoted to a column, because ALTER+populate would
+# cost a full 102 MB rebuild to store something computable in ~0.2 ms.
+_ORACLE_SIG = ("lower(coalesce(json_extract(data, '$.name'), '')) || char(31)"
+               "|| lower(coalesce(json_extract(data, '$.oracle_text'), '')) || char(31)"
+               "|| lower(coalesce(json_extract(data, '$.type_line'), '')) || char(31)"
+               "|| coalesce(json_extract(data, '$.mana_cost'), '')")
+
+def _oracle_signature(card):
+    """Python twin of _ORACLE_SIG, so --no-db groups identically to SQL."""
+    return (str(card.get("name") or "").lower(),
+            str(card.get("oracle_text") or "").lower(),
+            str(card.get("type_line") or "").lower(),
+            card.get("mana_cost") or "")
+
+def search_oracle(query, limit=None):
+    """Canonical cards for a name, deduplicated across identical printings.
+
+    Exact-name match is the primary path and is grouped by rules-text
+    signature; if nothing matches exactly it falls back to a substring scan
+    (ungrouped — measured collapse gain there is 0, e.g. 'ring' 678 rows ->
+    678 groups, so grouping would only add cost). Returns
+    (records, total, mode) where records are (card, printing_count) pairs in
+    cache order, `total` is the untruncated group/row count, and mode is
+    "exact" | "substr".
+
+    Grouping is lossless: audited across every name in the cache, no distinct
+    oracle_text is ever hidden by it. Same-name cards that differ in text stay
+    separate records (e.g. 'Elemental' -> 13 records over 31 printings).
+    """
+    q = query.lower().strip('"')
+    if DB_MODE:
+        rows = DB.execute(
+            "SELECT min(rid) AS rid, count(*) AS n FROM cards"
+            " WHERE name_lc = ? GROUP BY %s ORDER BY min(rid)" % _ORACLE_SIG,
+            (q,)).fetchall()
+        if rows:
+            ids = [r[0] for r in (rows[:limit] if limit else rows)]
+            hydrated = {h[0]: json.loads(h[1]) for h in DB.execute(
+                "SELECT rid, data FROM cards WHERE rid IN (%s)"
+                % ",".join("?" * len(ids)), ids)}
+            return ([(hydrated[r[0]], r[1]) for r in rows[:limit] if r[0] in hydrated],
+                    len(rows), "exact")
+        # Substr fallback: ungrouped, and --limit pushed into SQL so a query like
+        # `oracle a` (29,707 matches) does not hydrate thousands of discarded rows.
+        # total still counts every match so the "N of M shown" notice stays honest.
+        total = DB.execute(
+            "SELECT count(*) FROM cards WHERE name_lc LIKE ? ESCAPE '\\'",
+            (_like_pattern(q),)).fetchone()[0]
+        sql = "SELECT data FROM cards WHERE name_lc LIKE ? ESCAPE '\\' ORDER BY rid"
+        params = (_like_pattern(q),)
+        if limit:
+            sql += " LIMIT ?"
+            params = params + (limit,)
+        cards = [json.loads(r[0]) for r in DB.execute(sql, params).fetchall()]
+        return ([(c, 1) for c in cards], total, "substr")
+
+    # Legacy path: one pass over CARDS. Exact hits bucket by the same signature
+    # the SQL uses; substring hits are kept flat (ungrouped), matching DB_MODE.
+    exact = {}
+    subs = []
+    for i, card in enumerate(CARDS):
+        name = str(card.get("name") or "").lower()
+        if name == q:
+            key = _oracle_signature(card)
+            if key not in exact:
+                exact[key] = [i, card, 0]
+            exact[key][2] += 1
+        elif q in name:
+            subs.append((i, card))
+    if exact:
+        ordered = sorted(exact.values(), key=lambda v: v[0])
+        taken = ordered[:limit] if limit else ordered
+        return ([(v[1], v[2]) for v in taken], len(ordered), "exact")
+    ordered_subs = sorted(subs, key=lambda t: t[0])
+    taken = ordered_subs[:limit] if limit else ordered_subs
+    return ([(c, 1) for _, c in taken], len(ordered_subs), "substr")
+
 # ── Display a single card ───────────────────────────────────────────────
 def display_card(card, index=None):
     name = card.get("name", "Unknown")
@@ -547,6 +648,45 @@ def display_card(card, index=None):
     print(f"       {oracle}")
     print(f"       Legal: {legal_str}")
     print(f"       {card.get('scryfall_uri', '')}")
+
+# ── Display a canonical card-text record (`oracle`) ─────────────────────
+def display_oracle_card(card, printings=1, index=None):
+    """Text-first rendering: no legality badges, no prices, no URI.
+
+    Colours come from `colors` (printed colours) rather than color_identity as
+    display_card does, because text_card() — the projection this renders — does
+    not carry color_identity, and inventing a lookup here would reintroduce the
+    field oracle deliberately drops.
+    """
+    name = card.get("name", "Unknown")
+    mana = card.get("mana_cost", "")
+    cmc = card.get("cmc", "?")
+    cmc_display = int(cmc) if isinstance(cmc, (int, float)) and cmc == int(cmc) else cmc
+    type_line = card.get("type_line", "—")
+    oracle = card.get("oracle_text") or "(no rules text)"
+    power = card.get("power")
+    toughness = card.get("toughness")
+    colors = card.get("colors", [])
+    keywords = card.get("keywords", [])
+
+    pt = f" ({power}/{toughness})" if power and toughness else ""
+    colour_str = " ".join(COLOUR_SYMBOLS.get(x, x) for x in colors) if colors else ""
+    cost_bits = []
+    if mana:
+        cost_bits.append(mana)
+    cost_bits.append("CMC " + str(cmc_display))
+    if printings > 1:
+        cost_bits.append("%d printings" % printings)
+
+    prefix = f"  [{index}] " if index is not None else "  "
+    print('\n' + prefix + c(name, '1;33') + '  ' + '  ·  '.join(cost_bits))
+    print(f"       {type_line}{pt}")
+    if colour_str:
+        print(f"       {colour_str}")
+    if keywords:
+        print(f"       Keywords: {', '.join(keywords)}")
+    for line in str(oracle).split("\n"):
+        print(f"       {line}")
 
 # ── Search functions ────────────────────────────────────────────────────
 # Each returns a list of card dicts in cache order, whether served from the
@@ -1357,7 +1497,7 @@ def handle_update():
              " queries will use the JSONL scan path.")
 
 VALID_COMMANDS = {"name", "text", "type", "color", "cmc", "keyword", "fuzzy", "random",
-                  "search", "price", "image", "update", "reindex", "doctor"}
+                  "search", "price", "image", "update", "reindex", "doctor", "oracle"}
 
 # ── Index maintenance commands (Option C) ───────────────────────────────
 def handle_reindex():
@@ -1424,6 +1564,57 @@ def handle_doctor():
     print()
     for k, v in lines:
         print("  " + c(k.ljust(width), '1') + "  " + str(v))
+    print()
+
+def _handle_oracle(query, options):
+    """`oracle <name>`: canonical rules text, deduplicated across identical printings.
+
+    Deliberately offline-only (no Scryfall API step) so it stays a guaranteed-fast
+    lookup; typos are `fuzzy`'s job. --commander/--legal/--sort do not apply to a
+    single-card lookup, and csv/tsv have no column set for this shape, so those
+    are warned about rather than silently ignored.
+    """
+    limit = options["limit"]
+    records, total, mode = search_oracle(query, limit=None if not limit or limit <= 0 else limit)
+
+    if options.get("commander") or options.get("legal"):
+        warn("oracle ignores --commander/--legal (a lookup, not a browse;"
+             " use 'name'/'search' with those filters)")
+    if options.get("sort"):
+        warn("oracle ignores --sort (results are in cache order)")
+
+    shown = len(records)
+    if machine_mode():
+        if MODE in ("csv", "tsv"):
+            emit_single({"error": "unsupported_format", "format": MODE,
+                         "command": "oracle", "valid_formats": ["pretty", "json", "jsonl"]})
+            sys.exit(1)
+        if total > shown:
+            warn(f"{shown} of {total} matches shown (use --limit {total} for all)")
+        # Same array-vs-lines contract emit_records() upholds for other commands.
+        payloads = []
+        for card, n in records:
+            out = text_card(card)
+            if n > 1:
+                out["printings"] = n
+            payloads.append(out)
+        if MODE == "json":
+            json.dump(payloads, sys.stdout, ensure_ascii=False, default=str)
+            sys.stdout.write("\n")
+        else:
+            for out in payloads:
+                sys.stdout.write(json.dumps(out, ensure_ascii=False, default=str) + "\n")
+        return
+
+    if not records:
+        print("\n  No cards found matching your search.")
+        return
+    if total > shown:
+        print(f"\n  Showing {shown} of {total} results (use --limit {total} to see all):")
+    else:
+        print(f"\n  Found {total} canonical result{'s' if total != 1 else ''}:")
+    for i, (card, n) in enumerate(records, 1):
+        display_oracle_card(card, printings=n, index=i)
     print()
 
 def sort_results(results, sort_key):
@@ -1530,6 +1721,11 @@ def main():
             sys.exit(1)
     elif command == "keyword":
         results = search_keyword(query)
+    elif command == "oracle":
+        # Own shape (records + printing counts, text-only projection), so it
+        # bypasses the shared filter/sort/emit block below.
+        _handle_oracle(query, options)
+        return
     elif command == "random":
         results = search_random()
     elif command == "search":

@@ -34,7 +34,9 @@ Stream rules:
 
 ## Record schema (search results)
 
-Every card record has exactly these fields:
+Every card record from `name`, `text`, `type`, `color`, `cmc`, `keyword`,
+`search`, `random`, `price`, and `fuzzy` has exactly these fields (`oracle`
+returns a deliberate subset — see its section below):
 
 | Field | Type | Notes |
 |---|---|---|
@@ -63,6 +65,7 @@ Run `scryfall <command> "<query>" [flags]` via your shell/bash tool.
 | Command | Use when | Example |
 |---|---|---|
 | `fuzzy "<name>"` | You have a card name, possibly misspelled or partial. START HERE for named-card questions. | `scryfall fuzzy "sol rng"` |
+| `oracle "<name>"` | You know the exact name and want ONLY what the card does. Cheapest answer for "what does this card do?" | `scryfall oracle "Sol Ring"` |
 | `name "<text>"` | Substring match on card names | `scryfall name "drake"` |
 | `text "<effect>"` | Find cards that DO something | `scryfall text "counter target spell"` |
 | `type "<type>"` | Find cards that ARE something | `scryfall type "enchantment"` |
@@ -78,6 +81,32 @@ Run `scryfall <command> "<query>" [flags]` via your shell/bash tool.
 
 Useful flags: `--limit N` (default 10), `--legal commander|modern|legacy|pauper|vintage`,
 `--commander WUBRG` (identity fits within these colours), `--exact`.
+
+`oracle` ignores `--commander`, `--legal`, and `--sort` (it is a lookup, not a
+browse) and warns on stderr when they are passed. It accepts `--limit`, `--format`,
+`--json`, `--jsonl`, `--pretty`, `--no-db`; `--csv`/`--tsv` return an error object.
+
+## oracle: canonical text records
+
+`oracle "<name>"` emits FEWER fields than the record schema above — exactly
+`name`, `mana_cost`, `cmc`, `type_line`, `colors`, `power`, `toughness`,
+`oracle_text`, `keywords`, plus an optional `printings` integer that appears only
+when identical printings collapsed into one record:
+
+```json
+{"name": "Sol Ring", "mana_cost": "{1}", "cmc": 1.0, "type_line": "Artifact", "colors": [], "power": null, "toughness": null, "oracle_text": "{T}: Add {C}{C}.", "keywords": []}
+```
+
+It carries **no** `legalities`, `prices`, `image_uris`, or `scryfall_uri`. So when
+the question involves format legality, market value, or an image, `oracle` is the
+wrong command — use `fuzzy`, `name`, or `price`. Do not infer legality or price
+from an `oracle` record; the fields are absent by design, not unknown to you.
+
+Matching order: exact name (grouped by canonical text, so same-name cards with
+genuinely different text stay separate records), then substring fallback. An empty
+result means no card of that name is cached — for a possible misspelling, retry
+with `fuzzy` rather than concluding the card does not exist. Never fabricate the
+missing text.
 
 ## Command-specific response shapes
 

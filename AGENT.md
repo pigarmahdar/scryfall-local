@@ -43,7 +43,8 @@ Every card record has exactly these fields:
 | `mana_cost` | string | e.g. `"{1}{U}"`; empty for some special cards |
 | `cmc` | number | Converted mana cost; usually integer, can be fractional (e.g. `0.5`) |
 | `type_line` | string | e.g. `"Creature — Drake"` |
-| `colors` | array | Colour identity letters W/U/B/R/G |
+| `colors` | array | Printed colours of the card (may differ from `color_identity`) |
+| `color_identity` | array | Colour identity letters W/U/B/R/G — what counts for deck legality. Added in the SQLite-index release; older cached output lacked this field. |
 | `power`, `toughness` | string\|null | Creatures only; STRINGS not numbers (`"3"`, `".5"`, `"*"`); null for non-creatures |
 | `oracle_text` | string | Canonical rules text; may contain `\n` |
 | `keywords` | array | e.g. `["Flying", "Menace"]` |
@@ -72,6 +73,8 @@ Run `scryfall <command> "<query>" [flags]` via your shell/bash tool.
 | `price "<name>"` | Market prices, most expensive first | `scryfall price "Force of Will"` |
 | `random` | A random card | `scryfall random` |
 | `image "<name>"` | Download card image PNG/JPG to disk | `scryfall image "Sol Ring" --out /tmp/cards` |
+| `reindex` | Rebuild the local search index (rarely needed; see below) | `scryfall reindex` |
+| `doctor` | Report index health/staleness | `scryfall doctor` |
 
 Useful flags: `--limit N` (default 10), `--legal commander|modern|legacy|pauper|vintage`,
 `--commander WUBRG` (identity fits within these colours), `--exact`.
@@ -111,6 +114,31 @@ context:
 ```shell
 scryfall search "counter target spell" --limit 500 2>/dev/null | jq -r 'select(.legalities.modern=="legal") | .name'
 ```
+
+## Latency and the search index
+
+Queries are served from a SQLite index derived from the Oracle cache
+(`~/.hermes/scryfall/oracle-cards.db`, ~102 MB, rebuilt automatically on demand or
+by `scryfall update`). A typical lookup costs **43–58 ms**; broad queries
+(`type creature`, `cmc <=3`) cost ~220 ms because they materialise thousands of
+rows, not because of the lookup. Peak memory is 22–39 MB per call for typical
+queries.
+
+Practical consequences for you:
+
+- **Batching is cheap now.** Firing 20 lookups in one reasoning turn costs ~1 s,
+  not ~30 s. Do not consolidate distinct questions into one guess.
+- **Parallel calls are safe.** Memory no longer balloons per process, so `&&`
+  chains or concurrent invocations will not thrash.
+- **First call after a cache update pays a one-time index build (~2 s).** If a
+  call seems slow, that is why; subsequent calls are fast.
+- The index is **derived data**. Deleting it is always safe — it rebuilds. It is
+  never committed to git.
+
+If you suspect the index is lying to you (unexpected empty results), run
+`scryfall doctor` and compare against `scryfall <same query> --no-db`, which
+forces the legacy full-scan path. Report a divergence as a bug; do not silently
+work around it.
 
 ## Hard rules
 

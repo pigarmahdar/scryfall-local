@@ -50,3 +50,14 @@ echo "✅ Scryfall Oracle Cards updated: $TIMESTAMP"
 echo "   File: $JSONL_FILE"
 echo "   Size: $FILE_SIZE"
 echo "   Cards: $LINE_COUNT"
+
+# 5. Refresh the derived search index so queries stay fast.
+#    Safe to skip: the tool detects a stale index by mtime/size and rebuilds
+#    or falls back on its own — this just avoids a slow first query later.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$SCRIPT_DIR/scryfall" ]; then
+    echo "Rebuilding search index..."
+    "$SCRIPT_DIR/scryfall" reindex || echo "WARN: index rebuild failed; queries will use the full scan"
+else
+    echo "NOTE: run 'scryfall reindex' to refresh the search index (optional)."
+fi

@@ -12,7 +12,7 @@ Built for Magic: The Gathering players who want fast card lookups during deckbui
 - 🖼️ **Card image download** — grab high-res PNGs straight to your Desktop
 - 🤖 **LLM-ready output** — auto-detects agents vs humans; JSONL/JSON/CSV when piped, plus [AGENT.md](AGENT.md) instructions for models
 - 🎲 **Random card** generation
-- ⚡ **Instant** — loads 38,000+ cards in under two seconds
+- ⚡ **Fast** — ~50 ms per lookup from a SQLite index (was ~1.6 s per call)
 - 🔒 **Offline** — works without internet once the cache is downloaded
 - 🎨 **Colour-coded output** with emoji symbols (⚪🔵⚫🔴🟢)
 - 🏛️ **Format filtering** — Commander, Modern, Legacy, Pauper, Vintage
@@ -71,6 +71,8 @@ scryfall random
 | `random` | Get a random card | `scryfall random` |
 | `search` | General search across name + text + type | `scryfall search "2 mana green creature"` |
 | `update` | Update the Oracle cache from Scryfall | `scryfall update` |
+| `reindex` | Rebuild the local search index | `scryfall reindex` |
+| `doctor` | Report index health and staleness | `scryfall doctor` |
 
 ## Options
 
@@ -87,6 +89,38 @@ scryfall random
 | `--format <fmt>` | Output format: `pretty`, `json`, `jsonl`, `csv`, `tsv` (see [Machine-Readable Output](#machine-readable-output-for-llms--scripts)) | `--format json` |
 | `--json` / `--jsonl` / `--csv` / `--tsv` | Shorthands for the corresponding `--format` value | `--json` |
 | `--pretty` | Force human-styled output even when piped | `--pretty` |
+| `--no-db` | Bypass the search index and scan the cache (debugging) | `--no-db` |
+
+## How searching works now: the SQLite index
+
+Queries are answered from a **SQLite index** built from the Oracle cache, using
+FTS5 full-text search. This replaced parsing all 38,700 cards on every
+invocation:
+
+| | Before | Now |
+|---|---|---|
+| Typical lookup (`name`, `text`, `search`, `price`, `random`) | ~1.6 s | **43–58 ms** |
+| Broad query (`type creature`, `cmc <=3`) | ~1.6 s | ~220 ms |
+| Peak memory per call | ~920 MB | **22–39 MB** typical |
+| Startup cost | parse whole file | open index |
+
+Things worth knowing:
+
+- **The index is derived data.** It lives at `~/.hermes/scryfall/oracle-cards.db`
+  (~102 MB — *smaller* than the 194 MB JSONL it comes from), alongside transient
+  `-wal`/`-shm` files while open and a `.lock` during builds. Delete any of it and
+  it rebuilds automatically; none of it is ever committed to git.
+- **It builds itself.** The first query after installing or after `scryfall update`
+  pays a one-time ~2 s build. `scryfall update` also rebuilds it for you.
+  `scryfall reindex` forces a rebuild; `scryfall doctor` reports freshness,
+  schema version, FTS5 availability, and row-count parity with the JSONL.
+- **Behaviour is unchanged.** Same commands, same flags, same output, same order.
+  Results are compared against the old path by `tests/parity.py` (193 checks).
+- **Fallback is automatic and total.** If `sqlite3`, FTS5, or the trigram tokenizer
+  is missing, or the index is stale or corrupt, the tool silently uses the original
+  full-file scan. Worst case you get yesterday's speed, never a wrong answer.
+  `--no-db` forces that path for debugging.
+- **Searching stays offline; `update` and `image`/`fuzzy` resolution need internet.**
 
 ## Machine-Readable Output (for LLMs & scripts)
 
@@ -108,13 +142,18 @@ Each record uses stable, minimal fields:
 
 ```json
 {"name": "Sol Ring", "lang": "en", "mana_cost": "{1}", "cmc": 1.0,
- "type_line": "Artifact", "colors": [], "power": null, "toughness": null,
+ "type_line": "Artifact", "colors": [], "color_identity": [],
+ "power": null, "toughness": null,
  "oracle_text": "{T}: Add {C}{C}.", "keywords": [],
  "legalities": {"commander": "legal", "modern": "not_legal"},
  "prices": {"usd": 1.19, "eur": 1.08},
  "image_uris": {"small": "...", "normal": "...", "large": "...", "png": "..."},
  "scryfall_uri": "https://scryfall.com/card/..."}
 ```
+
+`colors` is the card's printed colours; `color_identity` is what counts for deck
+legality (they differ on cards like Savai Triome, which has no colours but a
+three-colour identity).
 
 Examples for agent pipelines:
 
@@ -241,7 +280,13 @@ scryfall update
 
 This downloads the latest Oracle Cards bulk data (~200 MB) from Scryfall, backs up your existing cache, and replaces it. If anything fails, the backup is restored automatically.
 
-You can also update manually:
+You can also use the standalone shell script `update_cache.sh` (included in this repo), which wraps `curl` + `gunzip` for environments where Python isn't available or when you prefer a simpler cron job:
+
+```shell
+./update_cache.sh
+```
+
+Or update manually:
 
 ```shell
 curl -o ~/.hermes/scryfall/oracle-cards.jsonl.gz \
@@ -312,9 +357,6 @@ for any card text, legality, or price question.
 
 2. *Bash-tool route*: give the model shell access plus the AGENT.md preamble —
    set `SCRYFALL_FORMAT=jsonl` in the environment for belt-and-braces.
-
-   A dedicated [OpenWebUI Tool version](https://github.com/pigarmahdar/scryfall-local/tree/main/openwebui)
-   also exists — see the `openwebui/` folder.
 
 **Claude Code / generic bash agents** — add to `CLAUDE.md` or project instructions:
 
